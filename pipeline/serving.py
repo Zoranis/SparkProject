@@ -11,10 +11,25 @@ env vars via fixtures.
 """
 from __future__ import annotations
 
+import psycopg2
+
+from pipeline import config
+
 
 def total_revenue(d: str, h: int) -> float:
-    raise NotImplementedError("Stage 3: implement total_revenue — see stages/03-etl-analyst-store/")
+    pg = config.postgres_kwargs()
+    with psycopg2.connect(**pg) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT total_amount FROM hourly_revenue WHERE trip_date = %s AND hour = %s",
+            (d, h),
+        )
+        row = cur.fetchone()
+    return float(row[0]) if row else 0.0
 
 
 def avg_revenue(h: int) -> float:
-    raise NotImplementedError("Stage 4: implement avg_revenue — see stages/04-backend-serving/")
+    import redis as _redis
+    rd = config.redis_kwargs()
+    r = _redis.Redis(**rd)
+    val = r.get(f"avg_revenue:{h}")
+    return float(val) if val is not None else 0.0

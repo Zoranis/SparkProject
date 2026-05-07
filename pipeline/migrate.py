@@ -18,6 +18,25 @@ the wipe-side counterpart that touches both stores.
 """
 from __future__ import annotations
 
+import psycopg2
+
 
 def migrate(pg_kwargs: dict) -> None:
-    raise NotImplementedError("Stage 3: implement migrate — see stages/03-etl-analyst-store/")
+    with psycopg2.connect(**pg_kwargs) as conn, conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_files (
+                filename TEXT PRIMARY KEY
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS hourly_revenue (
+                trip_date DATE NOT NULL,
+                hour      INT  NOT NULL,
+                total_amount DOUBLE PRECISION NOT NULL,
+                PRIMARY KEY (trip_date, hour)
+            )
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS hourly_revenue_date_hour_idx
+                ON hourly_revenue (trip_date, hour)
+        """)
