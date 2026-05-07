@@ -1,0 +1,190 @@
+# Spark hands-on lab: standalone cluster + driver + analyst DB + serving store + producer.
+#
+# Standalone — does NOT merge labs/base/compose.yml. The Spark lesson is a deliberate
+# departure from the MyST teaching model; students work directly in spark-jupyter.
+#
+# Architecture:
+#   spark-master / spark-worker-1 / spark-worker-2   Spark Standalone cluster
+#   spark-jupyter                                    Driver + notebook + pipeline code
+#   spark-postgres                                   Analyst store (DB `taxi` only; no DDL)
+#   spark-redis                                      Serving store (no keys pre-created)
+#   spark-producer                                   Lean cp loop: drops one day-file into
+#                                                    data/landing/ every 10s from data/days/
+#
+# Sizing: tuned for an 8 GB laptop. Total guaranteed ~5 GB (jupyter gets 2 GB hard
+# cap so the local Spark bootstrap in scripts/split_days.py has headroom).
+
+services:
+  spark-master:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark-master
+    hostname: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    cpuset: "0"
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8080' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  spark-worker-1:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=900m
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    volumes:
+      - spark_data:/home/jovyan/work/data:ro
+    cpuset: "1"
+    mem_limit: 1g
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spark-worker-2:
+    image: bitnamilegacy/spark:3.5.1
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=900m
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    volumes:
+      - spark_data:/home/jovyan/work/data:ro
+    cpuset: "2"
+    mem_limit: 1g
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spark-jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile.jupyter
+    container_name: spark-jupyter
+    hostname: spark-jupyter
+    # Start as root so docker-stacks' start.sh can run CHOWN_EXTRA against the
+    # spark_data volume (workers mount it first and create it root-owned) and
+    # then drop privileges to NB_USER before launching Jupyter.
+    user: root
+    environment:
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=python3
+      - PYTHONUNBUFFERED=1
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - PG_URL=jdbc:postgresql://spark-postgres:5432/taxi
+      - PG_HOST=spark-postgres
+      - PG_PORT=5432
+      - PG_DB=taxi
+      - PG_USER=spark
+      - PG_PASSWORD=spark
+      - REDIS_HOST=spark-redis
+      - REDIS_PORT=6379
+      - LANDING_DIR=/home/jovyan/work/data/landing
+      - IN_PROCESS_DIR=/home/jovyan/work/data/in_process
+      - ARCHIVE_DIR=/home/jovyan/work/data/archive
+      - ERRORS_DIR=/home/jovyan/work/data/errors
+      - SANDBOX_DIR=/home/jovyan/work/data/sandbox
+      - CHOWN_EXTRA=/home/jovyan/work/data
+      - CHOWN_EXTRA_OPTS=-R
+    working_dir: /home/jovyan/work
+    volumes:
+      - ./notebooks:/home/jovyan/work/notebooks
+      - ./jobs:/home/jovyan/work/jobs
+      - ./helpers:/home/jovyan/work/helpers
+      - ./pipeline:/home/jovyan/work/pipeline
+      - ./tests:/home/jovyan/work/tests
+      - ./scripts:/home/jovyan/work/scripts
+      - spark_data:/home/jovyan/work/data
+    command: ["start-notebook.sh", "--ServerApp.token=", "--ServerApp.password=", "--ServerApp.allow_origin=*"]
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    cpuset: "3"
+    mem_limit: 2g
+    mem_reservation: 1500m
+    depends_on:
+      spark-master:
+        condition: service_healthy
+      spark-postgres:
+        condition: service_healthy
+      spark-redis:
+        condition: service_healthy
+    # Port 8888 only opens after before-notebook.d hooks finish, so "healthy"
+    # means bootstrap completed and Jupyter is up. start_period is generous to
+    # cover first-run parquet downloads (~1.6 GB).
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/8888' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15m
+    restart: unless-stopped
+
+  spark-postgres:
+    image: postgres:16-alpine
+    container_name: spark-postgres
+    hostname: spark-postgres
+    environment:
+      - POSTGRES_USER=spark
+      - POSTGRES_PASSWORD=spark
+      - POSTGRES_DB=taxi
+    ports:
+      - "5432:5432"
+    volumes:
+      - spark_pg_data:/var/lib/postgresql/data
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spark -d taxi"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  spark-redis:
+    image: redis:7-alpine
+    container_name: spark-redis
+    hostname: spark-redis
+    ports:
+      - "6379:6379"
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  spark_pg_data:
+  spark_data:

@@ -1,0 +1,36 @@
+# Spark driver image: Jupyter PySpark Notebook + Postgres JDBC JAR + test tooling.
+#
+# Version matrix (keep in sync with compose.yml):
+#   Spark 3.5.1 / Scala 2.12 / Python 3.11 / Postgres JDBC 42.7.3
+
+FROM quay.io/jupyter/pyspark-notebook:spark-3.5.1
+
+USER root
+
+RUN pip install --no-cache-dir \
+        pyspark==3.5.1 \
+        duckdb==1.1.* \
+        psycopg2-binary==2.9.* \
+        redis==5.* \
+        jupytext==1.16.* \
+        pytest==8.* \
+        pytest-timeout==2.*
+
+# Postgres JDBC on the driver classpath — avoids Ivy resolution at SparkSession start.
+RUN set -eux; \
+    JARS=/usr/local/spark/jars; \
+    curl -fsSL -o "$JARS/postgresql-42.7.3.jar" \
+        https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar && \
+    chown -R ${NB_UID}:${NB_GID} "$JARS"
+
+COPY spark-defaults.conf /usr/local/spark/conf/spark-defaults.conf
+
+# Pre-launch bootstrap hook. Docker-stacks' start.sh runs every file in
+# /usr/local/bin/before-notebook.d/ before launching Jupyter. `.sh` files are
+# sourced, so we keep it small and delegate the real work to Python scripts.
+COPY bootstrap.sh /usr/local/bin/before-notebook.d/30-bootstrap.sh
+RUN chmod +x /usr/local/bin/before-notebook.d/30-bootstrap.sh
+
+USER ${NB_UID}
+
+EXPOSE 8888 4040
